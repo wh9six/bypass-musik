@@ -1350,12 +1350,15 @@ function buildYtDlpStrategies(cookiesPath, tempDir) {
 }
 
 function ytDlpErrorDetail(error) {
-  const parts = [
-    error && error.stderr ? String(error.stderr) : "",
-    error && error.message ? String(error.message) : "",
-  ].filter(Boolean);
+  const text = [error && error.stderr ? String(error.stderr) : "", error && error.message ? String(error.message) : ""]
+    .filter(Boolean)
+    .join(" ");
 
-  return parts.join(" ").slice(-200).trim();
+  // baris ERROR pertama biasanya paling menjelaskan; sisanya dipotong di belakang
+  const errorLine = text.split(/\r?\n/).find((line) => line.includes("ERROR")) || "";
+  const tail = text.slice(-160);
+
+  return `${errorLine.trim()} ${errorLine && tail.includes(errorLine.trim()) ? "" : tail}`.trim().slice(0, 300);
 }
 
 async function probeYouTubeStrategies(rawUrl) {
@@ -1386,8 +1389,7 @@ async function probeYouTubeStrategies(rawUrl) {
                 output: path.join(tempDir, "probe-%(id)s.%(ext)s"),
               }),
               "--print",
-              "after_move:filepath",
-              "--skip-download",
+              "after_video:filename",
               rawUrl,
             ],
             60000
