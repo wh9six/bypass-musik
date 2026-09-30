@@ -45,6 +45,9 @@ const DEFAULT_COOKIES_FILE_PATH = path.join(process.cwd(), "cookies.json");
 const YTDLP_COOKIES_FROM_BROWSER = String(process.env.YTDLP_COOKIES_FROM_BROWSER || "").trim();
 // "auto" = biarkan yt-dlp pilih client sendiri (paling awet terhadap perubahan YouTube).
 const YTDLP_PLAYER_CLIENT = String(process.env.YTDLP_PLAYER_CLIENT || "auto").trim();
+// ytdl-core sudah lama tidak bisa membacakan format YouTube (butuh tambalannya
+// sendiri), jadi yt-dlp dipakai sebagai jalur utama kecuali dinyalakan manual.
+const USE_YTDLCORE = String(process.env.USE_YTDLCORE || "false").trim().toLowerCase() !== "false";
 const DEFAULT_TONE_SPEED_MULTIPLIER = 2.325581;
 const DEFAULT_TONE_AMP_DB = -2;
 const DEFAULT_EXPORT_OGG_QUALITY = 8;
@@ -1210,6 +1213,7 @@ function buildYtDlpArgs(flags) {
   addFlag("no-warnings", flags.noWarnings);
   addFlag("no-check-certificate", flags.noCheckCertificate);
   addFlag("geo-bypass", flags.geoBypass);
+  addFlag("sleep-requests", flags.sleepRequests);
   addFlag("output", flags.output);
   addFlag("restrict-filenames", flags.restrictFilenames);
   addFlag("ffmpeg-location", flags.ffmpegLocation);
@@ -1302,6 +1306,114 @@ function buildYtDlpClientSpecs() {
   return specs;
 }
 
+const YTDLP_AUDIO_FORMATS = [
+  "bestaudio[acodec!=none]/bestaudio/best[acodec!=none]/best",
+  "ba/b",
+];
+
+// Daftar strategi yang dicoba, dari yang paling sering berhasil di server datacenter.
+// Cookie sengaja dicoba belakangan: IP server yang sudah ditandai bot membuat cookie
+// justru memicu "butuh login", sementara tanpa cookie sering lolos.
+function buildYtDlpStrategies(cookiesPath, tempDir) {
+  const clientSpecs = buildYtDlpClientSpecs();
+  const strategies = [];
+
+  for (const spec of clientSpecs) {
+    strategies.push({
+      label: `client=${spec || "auto"} tanpa cookie`,
+      extractorArgs: ytDlpPlayerArg(spec),
+    });
+  }
+
+  if (cookiesPath) {
+    for (const spec of clientSpecs) {
+      strategies.push({
+        label: `client=${spec || "auto"} pakai cookie`,
+        extractorArgs: ytDlpPlayerArg(spec),
+        cookies: cookiesPath,
+      });
+    }
+  }
+
+  return strategies.map((strategy) => ({
+    noPlaylist: true,
+    noWarnings: true,
+    noCheckCertificate: true,
+    geoBypass: true,
+    sleepRequests: "0.5",
+    output: path.join(tempDir, "%(title).70B.%(ext)s"),
+    restrictFilenames: true,
+    ffmpegLocation: FFMPEG_BINARY || undefined,
+    forceIpv4: true,
+    ...strategy,
+  }));
+}
+
+function ytDlpErrorDetail(error) {
+  const parts = [
+    error && error.stderr ? String(error.stderr) : "",
+    error && error.message ? String(error.message) : "",
+  ].filter(Boolean);
+
+  return parts.join(" ").slice(-200).trim();
+}
+
+async function probeYouTubeStrategies(rawUrl) {
+  const binaryPath = await resolveYtDlpBinary();
+  if (!binaryPath) {
+    throw new Error("yt-dlp belum ada di server. Jalankan: node scripts/fetch-yt-dlp.mjs");
+  }
+
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "bypas-musik-probe-"));
+  try {
+    const cookiesPath = await resolveYtDlpCookiesFile(tempDir);
+    const strategies = buildYtDlpStrategies(cookiesPath, tempDir);
+    const results = [];
+
+    for (const strategy of strategies) {
+      const startedAt = Date.now();
+      let lastDetail = "";
+      let ok = false;
+
+      for (const format of YTDLP_AUDIO_FORMATS) {
+        try {
+          const { stdout } = await runYtDlp(
+            binaryPath,
+            [
+              ...buildYtDlpArgs({
+                ...strategy,
+                format,
+                output: path.join(tempDir, "probe-%(id)s.%(ext)s"),
+              }),
+              "--print",
+              "after_move:filepath",
+              "--skip-download",
+              rawUrl,
+            ],
+            60000
+          );
+          ok = true;
+          lastDetail = `${format} -> ${stdout.trim().split("\n").pop() || "oke"}`;
+          break;
+        } catch (error) {
+          lastDetail = `${format}: ${ytDlpErrorDetail(error)}`;
+        }
+      }
+
+      results.push({ label: strategy.label, ok, detail: lastDetail, ms: Date.now() - startedAt });
+    }
+
+    return {
+      binary: path.basename(binaryPath),
+      cookieCount: Array.isArray(YTDL_COOKIES) ? YTDL_COOKIES.length : 0,
+      playerClientConfig: YTDLP_PLAYER_CLIENT,
+      results,
+    };
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
+}
+
 async function downloadYouTubeAudioWithYtDlp(rawUrl) {
   const binaryPath = await resolveYtDlpBinary();
   if (!binaryPath) {
@@ -1311,67 +1423,45 @@ async function downloadYouTubeAudioWithYtDlp(rawUrl) {
   }
 
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "bypas-musik-ytdlp-"));
-  const outputTemplate = path.join(tempDir, "%(title).70B.%(ext)s");
 
   try {
     const cookiesPath = await resolveYtDlpCookiesFile(tempDir);
-    const baseFlags = {
-      noPlaylist: true,
-      noWarnings: true,
-      noCheckCertificate: true,
-      geoBypass: true,
-      output: outputTemplate,
-      restrictFilenames: true,
-      ffmpegLocation: FFMPEG_BINARY || undefined,
-      cookies: cookiesPath || undefined,
-      cookiesFromBrowser: !cookiesPath && YTDLP_COOKIES_FROM_BROWSER ? YTDLP_COOKIES_FROM_BROWSER : undefined,
-      forceIpv4: true,
-    };
+    const strategies = buildYtDlpStrategies(cookiesPath, tempDir);
+    if (YTDLP_COOKIES_FROM_BROWSER && !cookiesPath) {
+      strategies.forEach((strategy) => {
+        strategy.cookiesFromBrowser = YTDLP_COOKIES_FROM_BROWSER;
+      });
+    }
 
-    const clientSpecs = buildYtDlpClientSpecs();
-    const lastErrorPerClient = [];
+    const failures = [];
+    let lastError = null;
 
-    for (const spec of clientSpecs) {
-      const clientFlags = { ...baseFlags, extractorArgs: ytDlpPlayerArg(spec) };
-      // pakai cookie dulu (butuh buat video age-restricted), lalu tanpa cookie
-      // kalau server terblokir bot-check oleh YouTube
-      const cookieVariants = cookiesPath ? [clientFlags, { ...clientFlags, cookies: undefined }] : [clientFlags];
-      const formats = [
-        "bestaudio[acodec!=none]/bestaudio/best[acodec!=none]/best",
-        "ba/b",
-        "best",
-      ];
+    for (const strategy of strategies) {
+      let strategyError = null;
 
-      let clientError = null;
-      for (const flags of cookieVariants) {
-        for (const format of formats) {
-          try {
-            await runYtDlp(binaryPath, [...buildYtDlpArgs({ ...flags, format }), rawUrl], Math.max(REQUEST_TIMEOUT_MS, 180000));
-            clientError = null;
-            break;
-          } catch (error) {
-            clientError = error;
-          }
+      for (const format of YTDLP_AUDIO_FORMATS) {
+        try {
+          await runYtDlp(binaryPath, [...buildYtDlpArgs({ ...strategy, format }), rawUrl], Math.max(REQUEST_TIMEOUT_MS, 180000));
+          strategyError = null;
+          break;
+        } catch (error) {
+          strategyError = error;
         }
-        if (!clientError) break;
       }
 
-      if (!clientError) {
-        lastErrorPerClient.length = 0;
+      if (!strategyError) {
+        failures.length = 0;
+        lastError = null;
         break;
       }
 
-      lastErrorPerClient.push(clientError);
+      lastError = strategyError;
+      failures.push(`${strategy.label}: ${ytDlpErrorDetail(strategyError)}`);
     }
 
-    if (lastErrorPerClient.length) {
-      const combined = new Error(
-        lastErrorPerClient.map((error) => (error instanceof Error ? error.message : String(error))).join(" | ")
-      );
-      combined.stderr = lastErrorPerClient
-        .map((error) => `${String(error.stderr || "")} ${String(error.message || "")}`)
-        .join(" | ");
-      throw combined;
+    if (lastError) {
+      lastError.stderr = `${failures.join(" ; ").slice(0, 700)} || ${String(lastError.stderr || "")}`;
+      throw lastError;
     }
 
     const entries = await fs.readdir(tempDir, { withFileTypes: true });
@@ -1445,13 +1535,11 @@ async function downloadYouTubeAudio(rawUrl) {
   const { videoId, watchUrl } = await resolveYouTubeWatchUrl(rawUrl);
 
   // ID bukan 11 karakter tidak akan pernah bisa dibaca ytdl-core, jadi langsung yt-dlp.
-  if (!YOUTUBE_VIDEO_ID_PATTERN.test(videoId)) {
+  if (!USE_YTDLCORE || !YOUTUBE_VIDEO_ID_PATTERN.test(videoId)) {
     try {
       return await downloadYouTubeAudioWithYtDlp(watchUrl);
     } catch (fallbackError) {
-      throw new Error(
-        `ID video ${videoId} cuma ${videoId.length} karakter, ytdl-core tidak mendukungnya jadi harus lewat yt-dlp. ${toYtDlpFriendlyError(fallbackError)}`
-      );
+      throw new Error(toYtDlpFriendlyError(fallbackError));
     }
   }
 
@@ -2956,6 +3044,24 @@ app.post("/api/roblox/settings/cookies", requireAuthSession, requireAdminAccess,
     return res.status(500).json({
       ok: false,
       message: error instanceof Error ? error.message : "Gagal menyimpan cookies YouTube.",
+    });
+  }
+});
+
+app.post("/api/roblox/diagnose/youtube", requireAuthSession, requireAdminAccess, async (req, res) => {
+  try {
+    const target = String(req.body?.url || "https://www.youtube.com/watch?v=jNQXAC9IVRw").trim();
+    if (!isYouTubeUrl(target)) {
+      return res.status(400).json({ ok: false, message: "Diagnosis butuh link YouTube." });
+    }
+
+    const { watchUrl } = await resolveYouTubeWatchUrl(target);
+    const probe = await probeYouTubeStrategies(watchUrl);
+    return res.json({ ok: true, url: watchUrl, ...probe });
+  } catch (error) {
+    return res.status(500).json({
+      ok: false,
+      message: error instanceof Error ? error.message : "Diagnosis YouTube gagal.",
     });
   }
 });

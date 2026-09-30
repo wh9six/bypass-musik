@@ -72,6 +72,10 @@ export default function AdminDashboard({ session, onLogout }) {
   const [cookieInfo, setCookieInfo] = useState(null);
   const [cookieDraft, setCookieDraft] = useState("");
   const [cookieSaving, setCookieSaving] = useState(false);
+  const [diagnoseUrl, setDiagnoseUrl] = useState("");
+  const [diagnoseRunning, setDiagnoseRunning] = useState(false);
+  const [diagnoseResult, setDiagnoseResult] = useState(null);
+  const [diagnoseError, setDiagnoseError] = useState("");
 
   const [statusText, setStatusText] = useState("Mode admin: pantau upload user, atur API key, dan pengaturan studio.");
   const [statusTone, setStatusTone] = useState("idle");
@@ -286,6 +290,25 @@ export default function AdminDashboard({ session, onLogout }) {
       report(false, error instanceof Error ? error.message : "Gagal menghapus cookies YouTube.");
     } finally {
       setCookieSaving(false);
+    }
+  }
+
+  async function runYouTubeDiagnose() {
+    setDiagnoseRunning(true);
+    setDiagnoseError("");
+    try {
+      const { response, data } = await apiRequest(`${ROBLOX_API_BASE}/diagnose/youtube`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: diagnoseUrl.trim() }),
+      });
+      if (!response.ok || !data?.ok) throw new Error(data?.message || "Diagnosis YouTube gagal.");
+      setDiagnoseResult(data);
+    } catch (error) {
+      setDiagnoseResult(null);
+      setDiagnoseError(error instanceof Error ? error.message : "Diagnosis YouTube gagal.");
+    } finally {
+      setDiagnoseRunning(false);
     }
   }
 
@@ -776,6 +799,50 @@ export default function AdminDashboard({ session, onLogout }) {
                   Hapus Cookies
                 </button>
               </div>
+            </div>
+
+            <div className="ws-admin-panel">
+              <div className="ws-section-head">
+                <strong>Diagnosis Link YouTube</strong>
+                <span>server mencoba semua kombinasi player</span>
+              </div>
+
+              <div className="ws-inline-field">
+                <label htmlFor="diagnose-url">Link YouTube untuk dicek (kosong = video tes bawaan)</label>
+                <input
+                  id="diagnose-url"
+                  className="ws-input"
+                  value={diagnoseUrl}
+                  onChange={(event) => setDiagnoseUrl(event.target.value)}
+                  placeholder="https://youtu.be/..."
+                />
+                <small>
+                  Tidak ada file yang diunduh maupun diupload ke Roblox, jadi aman untuk mengetes tanpa
+                  membebani akun. Kalau semua kombinasi gagal, berarti IP server yang diblokir YouTube.
+                </small>
+              </div>
+
+              <div className="ws-admin-actions">
+                <button type="button" className="ws-primary" onClick={runYouTubeDiagnose} disabled={diagnoseRunning}>
+                  {diagnoseRunning ? "Menguji..." : "Jalankan Diagnosis"}
+                </button>
+              </div>
+
+              {diagnoseError ? <small className="ws-inline-warning">{diagnoseError}</small> : null}
+
+              {diagnoseResult ? (
+                <div className="ws-preview-tag-box">
+                  <small>
+                    yt-dlp: {diagnoseResult.binary} | cookie terbaca: {diagnoseResult.cookieCount} item | player:{" "}
+                    {diagnoseResult.playerClientConfig === "auto" ? "otomatis" : diagnoseResult.playerClientConfig}
+                  </small>
+                  {(diagnoseResult.results || []).map((item) => (
+                    <small key={item.label} className={item.ok ? "" : "ws-inline-warning"}>
+                      {item.ok ? "✓" : "✗"} {item.label} ({item.ms}ms) {item.ok ? "" : ` -> ${item.detail}`}
+                    </small>
+                  ))}
+                </div>
+              ) : null}
             </div>
 
             <div className="ws-admin-actions">
