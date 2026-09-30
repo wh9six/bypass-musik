@@ -291,7 +291,7 @@ async function appendUploadHistory(entries, { batchLabel = "", batchId = "", use
       .concat(savedEntries)
       .slice(-Math.max(10, Number.isFinite(UPLOAD_HISTORY_MAX_ITEMS) ? Math.floor(UPLOAD_HISTORY_MAX_ITEMS) : 2000));
 
-    await fs.writeFile(UPLOAD_HISTORY_FILE, JSON.stringify(trimmedHistory, null, 2), "utf8");
+    await writeDataFile(UPLOAD_HISTORY_FILE, JSON.stringify(trimmedHistory, null, 2));
     return savedEntries;
   };
 
@@ -328,7 +328,7 @@ async function updateUploadHistoryAssetId(uploadRecordId, assetId) {
       }
     }
     if (updated) {
-      await fs.writeFile(UPLOAD_HISTORY_FILE, JSON.stringify(history, null, 2), "utf8");
+      await writeDataFile(UPLOAD_HISTORY_FILE, JSON.stringify(history, null, 2));
     }
   };
 
@@ -346,7 +346,7 @@ async function deleteUploadHistoryItem(recordId) {
     const beforeCount = history.length;
     const filtered = history.filter((item) => Number(item.uploadRecordId) !== targetId);
     if (filtered.length !== beforeCount) {
-      await fs.writeFile(UPLOAD_HISTORY_FILE, JSON.stringify(filtered, null, 2), "utf8");
+      await writeDataFile(UPLOAD_HISTORY_FILE, JSON.stringify(filtered, null, 2));
       return true;
     }
     return false;
@@ -387,7 +387,7 @@ async function clearUploadHistory({ date = "", batch = "", username = "", all = 
       deletedCount = history.length - remaining.length;
     }
 
-    await fs.writeFile(UPLOAD_HISTORY_FILE, JSON.stringify(remaining, null, 2), "utf8");
+    await writeDataFile(UPLOAD_HISTORY_FILE, JSON.stringify(remaining, null, 2));
     return { deletedCount, remainingCount: remaining.length };
   };
 
@@ -443,10 +443,9 @@ async function saveDynamicRobloxApiKey(value) {
     throw new Error("API key Roblox tidak boleh kosong.");
   }
 
-  await fs.writeFile(
+  await writeDataFile(
     ROBLOX_API_KEY_STORE_FILE,
-    JSON.stringify({ robloxApiKey: key, updatedAt: new Date().toISOString() }, null, 2),
-    "utf8"
+    JSON.stringify({ robloxApiKey: key, updatedAt: new Date().toISOString() }, null, 2)
   );
 
   dynamicRobloxApiKey = key;
@@ -1948,7 +1947,17 @@ function safeCodeCompare(input, expected) {
 }
 
 async function writeJsonFile(filePath, data) {
-  await fs.writeFile(filePath, JSON.stringify(data, null, 2), "utf8");
+  await writeDataFile(filePath, JSON.stringify(data, null, 2));
+}
+
+// Tulis file data + pastikan folder induknya ada (penting kalau path diarahkan ke Volume /data)
+async function writeDataFile(filePath, contents) {
+  try {
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
+  } catch {
+    // kalau folder belum bisa dibuat, biarkan writeFile yang melaporkan error
+  }
+  await fs.writeFile(filePath, contents, "utf8");
 }
 
 async function loadAuthStore() {
@@ -2193,7 +2202,7 @@ async function saveStudioSettings(payload) {
   const settings = normalizeStudioSettings(payload, studioSettingsCache || DEFAULT_STUDIO_SETTINGS);
   studioSettingsCache = settings;
 
-  const run = () => fs.writeFile(STUDIO_SETTINGS_FILE, JSON.stringify(settings, null, 2), "utf8");
+  const run = () => writeDataFile(STUDIO_SETTINGS_FILE, JSON.stringify(settings, null, 2));
   const queued = studioSettingsWriteQueue.then(run, run);
   studioSettingsWriteQueue = queued.catch(() => {});
   await queued;
@@ -2639,7 +2648,7 @@ app.post("/api/roblox/settings/cookies", requireAuthSession, requireAdminAccess,
       });
     }
 
-    await fs.writeFile(COOKIES_STORE_FILE, JSON.stringify(cookies, null, 2), "utf8");
+    await writeDataFile(COOKIES_STORE_FILE, JSON.stringify(cookies, null, 2));
     resetYouTubeCookieCache();
     const status = await getYouTubeCookieStatus();
 

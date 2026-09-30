@@ -12,6 +12,8 @@ auth-users.json
 studio-settings.json
 cookies.json
 cookies-test.json
+railway-variables.txt
+tmpdata/
 creator-docs-tree.json
 
 # Artefak screenshot hasil pengecekan browser
