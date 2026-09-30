@@ -1162,15 +1162,16 @@ function UserWorkspace({ session, onLogout }) {
                     amp {result.audioSettings.ampDb} dB
                   </div>
                 )}
-                {Array.isArray(result.uploads) && result.uploads.length > 1 && (
+                {Array.isArray(result.uploads) && (result.uploads.length > 1 || !result.ok) && (
                   <div className="ws-result-list">
                     {result.uploads.slice(0, 8).map((item, index) => (
                       <div key={`${item.originalName || item.uploadedName || index}-${index}`} className="ws-row-split">
                         <span>
-                          {item.ok ? "OK" : "FAIL"} - {item.originalName || item.uploadedName}
+                          {item.ok ? "OK" : "FAIL"} - {item.originalName || item.uploadedName || item.sourceUrl || "tanpa nama"}
                           {item.assetId ? ` (Asset ${item.assetId})` : ""}
                           {item.uploadRecordId ? ` [ID ${item.uploadRecordId}]` : ""}
                           {item.uploadDate ? ` [${item.uploadDate}]` : ""}
+                          {!item.ok && item.message ? ` -> ${item.message}` : ""}
                         </span>
                         {item.assetId && (
                           <button type="button" className="ws-mini-btn" onClick={() => copyToClipboard("Asset ID", item.assetId)}>

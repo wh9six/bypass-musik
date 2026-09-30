@@ -21,3 +21,11 @@ shot-*.png
 verify-*.png
 cek-*.png
 tmp-*.png
+
+# File coretan sementara (jangan pernah ikut ke Git)
+tmp-*.ps1
+tmp-*.mjs
+tmp-*.js
+tmp-*.txt
+tmp-*.log
+tmp-*.json

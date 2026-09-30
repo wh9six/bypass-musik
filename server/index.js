@@ -680,6 +680,68 @@ function isYouTubeUrl(rawUrl) {
   return /(youtube\.com|youtu\.be)/i.test(String(rawUrl || "").trim());
 }
 
+// ID video YouTube versi ytdl-core wajib 11 karakter
+const YOUTUBE_VIDEO_ID_PATTERN = /^[a-zA-Z0-9-_]{11}$/;
+
+function extractYouTubeVideoId(value) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+
+  let url;
+  try {
+    url = new URL(text);
+  } catch {
+    // bukan URL, mungkin memang ID polos
+    return YOUTUBE_VIDEO_ID_PATTERN.test(text) ? text : "";
+  }
+
+  const host = url.hostname.replace(/^www\./i, "").toLowerCase();
+  const segments = url.pathname.split("/").filter(Boolean);
+
+  if (host === "youtu.be") return segments[0] || "";
+
+  const fromQuery = url.searchParams.get("v") || "";
+  if (fromQuery) return fromQuery;
+
+  const markerIndex = segments.findIndex((segment) => ["shorts", "embed", "live", "v"].includes(segment.toLowerCase()));
+  if (markerIndex >= 0 && segments[markerIndex + 1]) return segments[markerIndex + 1];
+
+  return "";
+}
+
+// YouTube sekarang kadang mengeluarkan ID kurang dari 11 karakter, sementara ytdl-core
+// memaksa pola 11 karakter. Link pendek youtu.be juga harus diikuti redirect-nya
+// supaya ketahuan ID aslinya (dan bentuknya jadi watch?v= yang paling dimengerti tool).
+async function resolveYouTubeWatchUrl(rawUrl) {
+  const original = String(rawUrl || "").trim();
+  let candidate = extractYouTubeVideoId(original);
+
+  if (!candidate && original) {
+    const { signal, timeout } = createAbortSignal(15000);
+    try {
+      const response = await fetch(original, {
+        method: "GET",
+        redirect: "follow",
+        signal,
+        headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" },
+      });
+      candidate = extractYouTubeVideoId(response.url || "") || "";
+    } catch {
+      // biarkan kosong, error yang menjelaskan
+    } finally {
+      clearAbortTimeout(timeout);
+    }
+  }
+
+  if (!candidate) {
+    throw new Error(
+      `Link YouTube tidak dikenali ("${original}"). Salin ulang link dari tombol Bagikan di YouTube.`
+    );
+  }
+
+  return { videoId: candidate, watchUrl: `https://www.youtube.com/watch?v=${candidate}` };
+}
+
 function sanitizeFileStem(value) {
   return String(value || "")
     .replace(/[^a-zA-Z0-9-_ ]+/g, " ")
@@ -797,6 +859,18 @@ function toYouTubeFriendlyError(error) {
     return "Akses ke stream YouTube ditolak (403). Coba video lain atau gunakan cookies akun YouTube lewat YTDL_COOKIES_JSON.";
   }
 
+  if (lowered.includes("does not match expected format")) {
+    return "Link YouTube-nya tidak lengkap / bukan link video yang benar (ID video harus 11 karakter). Buka video-nya di YouTube, tekan Bagikan > Salin link, lalu tempel ulang.";
+  }
+
+  if (lowered.includes("no video id found") || lowered.includes("not a youtube domain")) {
+    return "Itu bukan link video YouTube (link lain tidak bisa diimpor). Pakai link youtube.com/watch?v=... atau youtu.be/...";
+  }
+
+  if (lowered.includes("video unavailable")) {
+    return "Video YouTube-nya tidak bisa diakses (hapus, private, atau diblokir di negara/server).";
+  }
+
   if (lowered.includes("status code: 410")) {
     return "Stream YouTube sudah tidak tersedia (410). Coba link video lain yang masih aktif.";
   }
@@ -819,6 +893,10 @@ function toYtDlpFriendlyError(error) {
   const raw = messageParts.filter(Boolean).join(" | ");
   const lowered = raw.toLowerCase();
 
+  if (lowered.includes("looks truncated") || lowered.includes("incomplete youtube id")) {
+    return "Link YouTube-nya kepotong, ID video tidak lengkap. Buka video-nya di YouTube lalu Bagikan > Salin link, tempel yang penuh (ID video 11 karakter).";
+  }
+
   if (lowered.includes("private video")) {
     return "Video YouTube private, jadi tidak bisa diambil audionya dari backend.";
   }
@@ -839,7 +917,12 @@ function toYtDlpFriendlyError(error) {
     return "YouTube membatasi request dari server kamu (429). Coba lagi nanti atau pakai IP/proxy lain.";
   }
 
-  return `Fallback yt-dlp gagal: ${raw || "tanpa detail error"}`;
+  if (lowered.includes("python3") || lowered.includes("no such file or directory")) {
+    return "yt-dlp di server ini butuh Python tapi Python tidak ada. Di Railway, tambahkan variabel YOUTUBE_DL_FILENAME=yt-dlp_linux lalu redeploy supaya pakai yt-dlp standalone (tanpa Python).";
+  }
+
+  const detail = raw.length > 300 ? `${raw.slice(0, 300)}...` : raw;
+  return `Fallback yt-dlp gagal: ${detail || "tanpa detail error"}`;
 }
 
 function cookiesToNetscape(cookies) {
@@ -1037,6 +1120,38 @@ async function resolveYtDlpCookiesFile(tempDir) {
   }
 }
 
+const YTDLP_BINARY_NAME = String(process.env.YOUTUBE_DL_FILENAME || (process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp")).trim() || "yt-dlp";
+const YTDLP_BINARY_PATH = path.join(process.cwd(), "node_modules", "yt-dlp-exec", "bin", YTDLP_BINARY_NAME);
+
+// Cek binary yt-dlp yang keunduh: versi script butuh python3, versi standalone tidak
+async function getYouTubeToolStatus() {
+  const status = {
+    file: YTDLP_BINARY_PATH,
+    name: YTDLP_BINARY_NAME,
+    exists: false,
+    standalone: false,
+    needsPython: false,
+  };
+
+  try {
+    const handle = await fs.open(YTDLP_BINARY_PATH, "r");
+    try {
+      const buffer = Buffer.alloc(128);
+      const { bytesRead } = await handle.read(buffer, 0, 128, 0);
+      const head = buffer.subarray(0, bytesRead).toString("utf8");
+      status.exists = true;
+      status.needsPython = head.startsWith("#!") && /python/i.test(head);
+      status.standalone = !head.startsWith("#!");
+    } finally {
+      await handle.close();
+    }
+  } catch {
+    // binary belum ada (npm install dengan YOUTUBE_DL_SKIP_DOWNLOAD atau gagal unduh)
+  }
+
+  return status;
+}
+
 async function downloadYouTubeAudioWithYtDlp(rawUrl) {
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "bypas-musik-ytdlp-"));
   const outputTemplate = path.join(tempDir, "%(title).70B.%(ext)s");
@@ -1163,12 +1278,25 @@ async function downloadYouTubeAudio(rawUrl) {
     throw new Error("URL YouTube tidak valid untuk mode youtube-proxy.");
   }
 
+  const { videoId, watchUrl } = await resolveYouTubeWatchUrl(rawUrl);
+
+  // ID bukan 11 karakter tidak akan pernah bisa dibaca ytdl-core, jadi langsung yt-dlp.
+  if (!YOUTUBE_VIDEO_ID_PATTERN.test(videoId)) {
+    try {
+      return await downloadYouTubeAudioWithYtDlp(watchUrl);
+    } catch (fallbackError) {
+      throw new Error(
+        `ID video ${videoId} cuma ${videoId.length} karakter, ytdl-core tidak mendukungnya jadi harus lewat yt-dlp. ${toYtDlpFriendlyError(fallbackError)}`
+      );
+    }
+  }
+
   let info;
   try {
-    info = await getYouTubeInfoWithFallback(rawUrl);
+    info = await getYouTubeInfoWithFallback(watchUrl);
   } catch (error) {
     try {
-      return await downloadYouTubeAudioWithYtDlp(rawUrl);
+      return await downloadYouTubeAudioWithYtDlp(watchUrl);
     } catch (fallbackError) {
       throw new Error(`${toYouTubeFriendlyError(error)} ${toYtDlpFriendlyError(fallbackError)}`);
     }
@@ -1178,7 +1306,7 @@ async function downloadYouTubeAudio(rawUrl) {
 
   if (!audioFormats.length) {
     try {
-      return await downloadYouTubeAudioWithYtDlp(rawUrl);
+      return await downloadYouTubeAudioWithYtDlp(watchUrl);
     } catch (fallbackError) {
       throw new Error(
         `Audio stream YouTube tidak ditemukan dari ytdl-core. ${toYtDlpFriendlyError(fallbackError)}`
@@ -2486,6 +2614,7 @@ app.get("/api/roblox/health", async (_req, res) => {
     creatorResolvedBy,
     inferredCreator,
     youtubeCookie,
+    youtubeTool: await getYouTubeToolStatus(),
     maxAudioSeconds: MAX_AUDIO_SECONDS,
     maxAudioBytes: MAX_AUDIO_BYTES,
     toneProfileDefault: "whis-tone-match",

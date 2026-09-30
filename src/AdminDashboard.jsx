@@ -728,6 +728,15 @@ export default function AdminDashboard({ session, onLogout }) {
                     : "Cookies belum aktif. Upload dari link YouTube bisa gagal kena blokir 403/429."}
                 </small>
                 <small>File tersimpan di server: {cookieInfo?.cookieFile || "cookies.json"} (tidak pernah masuk GitHub).</small>
+                {health?.youtubeTool && (
+                  <small className={health.youtubeTool.exists && !health.youtubeTool.needsPython ? "" : "ws-inline-warning"}>
+                    {!health.youtubeTool.exists
+                      ? "yt-dlp belum terunduh di server, jadi link yang gagal lewat ytdl-core pasti ikut gagal."
+                      : health.youtubeTool.needsPython
+                        ? "yt-dlp di server ini versi script (butuh python3). Tambahkan variabel YOUTUBE_DL_FILENAME=yt-dlp_linux lalu redeploy."
+                        : `yt-dlp siap: ${health.youtubeTool.name} (standalone, tidak butuh Python).`}
+                  </small>
+                )}
                 {cookieInfo?.usesEnvJson && (
                   <small className="ws-inline-warning">
                     Variables YTDL_COOKIES_JSON sedang terisi, jadi cookies dari variabel itu yang dipakai lebih dulu.

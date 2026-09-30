@@ -73,6 +73,9 @@ if (Test-Path $CookiesFile) {
 # yt-dlp tidak boleh ambil cookie dari browser karena di server tidak ada Chrome
 $lines.Add("YTDLP_COOKIES_FROM_BROWSER=")
 
+# Image Railway tidak punya Python, jadi pakai yt-dlp versi standalone (binary siap jalan)
+$lines.Add("YOUTUBE_DL_FILENAME=yt-dlp_linux")
+
 if (-not $NoVolume) {
   $lines.Add("UPLOAD_HISTORY_FILE=/data/upload-history.json")
   $lines.Add("AUTH_SESSIONS_FILE=/data/auth-sessions.json")
