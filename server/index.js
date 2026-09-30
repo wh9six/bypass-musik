@@ -11,7 +11,6 @@ import express from "express";
 import ffmpegStatic from "ffmpeg-static";
 import multer from "multer";
 import ytdl from "@distube/ytdl-core";
-import ytDlp from "yt-dlp-exec";
 
 const app = express();
 
@@ -917,8 +916,8 @@ function toYtDlpFriendlyError(error) {
     return "YouTube membatasi request dari server kamu (429). Coba lagi nanti atau pakai IP/proxy lain.";
   }
 
-  if (lowered.includes("python3") || lowered.includes("no such file or directory")) {
-    return "yt-dlp di server ini butuh Python tapi Python tidak ada. Di Railway, tambahkan variabel YOUTUBE_DL_FILENAME=yt-dlp_linux lalu redeploy supaya pakai yt-dlp standalone (tanpa Python).";
+  if (lowered.includes("python3") || lowered.includes("no such file or directory") || lowered.includes("enoent")) {
+    return "Binary yt-dlp di server ini tidak bisa dijalankan (butuh Python atau belum terunduh). Pulihkan dengan: node scripts/fetch-yt-dlp.mjs";
   }
 
   const detail = raw.length > 300 ? `${raw.slice(0, 300)}...` : raw;
@@ -1120,39 +1119,147 @@ async function resolveYtDlpCookiesFile(tempDir) {
   }
 }
 
-const YTDLP_BINARY_NAME = String(process.env.YOUTUBE_DL_FILENAME || (process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp")).trim() || "yt-dlp";
-const YTDLP_BINARY_PATH = path.join(process.cwd(), "node_modules", "yt-dlp-exec", "bin", YTDLP_BINARY_NAME);
+// ---------------------------------------------------------------------------
+// yt-dlp: binary standalone (tanpa Python) hasil scripts/fetch-yt-dlp.mjs
+// ---------------------------------------------------------------------------
+const YTDLP_ASSET_NAME =
+  String(process.env.YTDLP_ASSET || "").trim() ||
+  (process.platform === "win32" ? "yt-dlp.exe" : process.platform === "darwin" ? "yt-dlp_macos" : "yt-dlp_linux");
 
-// Cek binary yt-dlp yang keunduh: versi script butuh python3, versi standalone tidak
+const YTDLP_CANDIDATE_PATHS = [
+  String(process.env.YTDLP_BINARY || "").trim(),
+  path.join(process.cwd(), "bin", YTDLP_ASSET_NAME),
+  path.join(process.cwd(), "bin", process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp"),
+  path.join(process.cwd(), "node_modules", "yt-dlp-exec", "bin", YTDLP_ASSET_NAME),
+].filter(Boolean);
+
+async function resolveYtDlpBinary() {
+  for (const candidate of YTDLP_CANDIDATE_PATHS) {
+    try {
+      await fs.access(candidate);
+      return candidate;
+    } catch {
+      // coba kandidat berikutnya
+    }
+  }
+  return null;
+}
+
+// Cek isi binary: versi script butuh python3, versi standalone tidak
 async function getYouTubeToolStatus() {
+  const binaryPath = await resolveYtDlpBinary();
   const status = {
-    file: YTDLP_BINARY_PATH,
-    name: YTDLP_BINARY_NAME,
-    exists: false,
+    file: binaryPath || YTDLP_CANDIDATE_PATHS[1] || YTDLP_ASSET_NAME,
+    name: path.basename(binaryPath || YTDLP_ASSET_NAME),
+    exists: Boolean(binaryPath),
     standalone: false,
     needsPython: false,
   };
 
+  if (!binaryPath) return status;
+
   try {
-    const handle = await fs.open(YTDLP_BINARY_PATH, "r");
+    const handle = await fs.open(binaryPath, "r");
     try {
       const buffer = Buffer.alloc(128);
       const { bytesRead } = await handle.read(buffer, 0, 128, 0);
       const head = buffer.subarray(0, bytesRead).toString("utf8");
-      status.exists = true;
       status.needsPython = head.startsWith("#!") && /python/i.test(head);
-      status.standalone = !head.startsWith("#!");
+      status.standalone = !status.needsPython;
     } finally {
       await handle.close();
     }
   } catch {
-    // binary belum ada (npm install dengan YOUTUBE_DL_SKIP_DOWNLOAD atau gagal unduh)
+    // tidak bisa dibaca, biarkan status apa adanya
   }
 
   return status;
 }
 
+function buildYtDlpArgs(flags) {
+  const args = [];
+  const addFlag = (name, value) => {
+    if (value === undefined || value === null || value === false || value === "") return;
+    if (value === true) args.push(`--${name}`);
+    else args.push(`--${name}`, String(value));
+  };
+
+  addFlag("no-playlist", flags.noPlaylist);
+  addFlag("no-warnings", flags.noWarnings);
+  addFlag("no-check-certificate", flags.noCheckCertificate);
+  addFlag("geo-bypass", flags.geoBypass);
+  addFlag("output", flags.output);
+  addFlag("restrict-filenames", flags.restrictFilenames);
+  addFlag("ffmpeg-location", flags.ffmpegLocation);
+  addFlag("cookies", flags.cookies);
+  addFlag("cookies-from-browser", flags.cookiesFromBrowser);
+  addFlag("extractor-args", flags.extractorArgs);
+  addFlag("force-ipv4", flags.forceIpv4);
+  addFlag("format", flags.format);
+  addFlag("extract-audio", flags.extractAudio);
+  addFlag("audio-format", flags.audioFormat);
+  addFlag("audio-quality", flags.audioQuality);
+
+  return args;
+}
+
+function runYtDlp(binaryPath, url, flags, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const args = [...buildYtDlpArgs(flags), url];
+    let child;
+    try {
+      child = spawn(binaryPath, args, { windowsHide: true });
+    } catch (error) {
+      reject(error);
+      return;
+    }
+
+    let stdout = "";
+    let stderr = "";
+    const timeoutId = setTimeout(() => {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        // child sudah mati
+      }
+      reject(new Error(`yt-dlp berhenti setelah ${timeoutMs} ms.`));
+    }, timeoutMs);
+
+    child.stdout?.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
+    child.stderr?.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+    child.on("error", (error) => {
+      clearTimeout(timeoutId);
+      const wrapped = new Error(`Gagal menjalankan yt-dlp: ${error.message}`);
+      wrapped.stderr = error.message;
+      reject(wrapped);
+    });
+    child.on("close", (code) => {
+      clearTimeout(timeoutId);
+      if (code === 0) {
+        resolve({ stdout, stderr });
+        return;
+      }
+      const error = new Error(`yt-dlp keluar dengan kode ${code}.`);
+      error.stderr = stderr || stdout;
+      error.shortMessage = stderr || stdout;
+      error.exitCode = code;
+      reject(error);
+    });
+  });
+}
+
 async function downloadYouTubeAudioWithYtDlp(rawUrl) {
+  const binaryPath = await resolveYtDlpBinary();
+  if (!binaryPath) {
+    throw new Error(
+      "yt-dlp belum ada di server (binary standalone tidak ketemu). Jalankan: node scripts/fetch-yt-dlp.mjs"
+    );
+  }
+
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "bypas-musik-ytdlp-"));
   const outputTemplate = path.join(tempDir, "%(title).70B.%(ext)s");
 
@@ -1196,9 +1303,7 @@ async function downloadYouTubeAudioWithYtDlp(rawUrl) {
     let lastError = null;
     for (const flags of attempts) {
       try {
-        await ytDlp(rawUrl, flags, {
-          timeout: Math.max(REQUEST_TIMEOUT_MS, 180000),
-        });
+        await runYtDlp(binaryPath, rawUrl, flags, Math.max(REQUEST_TIMEOUT_MS, 180000));
         lastError = null;
         break;
       } catch (error) {

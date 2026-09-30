@@ -16,6 +16,10 @@ railway-variables.txt
 tmpdata/
 creator-docs-tree.json
 
+# Binary yt-dlp hasil unduhan (jangan ikut ke Git)
+bin/yt-dlp*
+bin/*.download
+
 # Artefak screenshot hasil pengecekan browser
 shot-*.png
 verify-*.png

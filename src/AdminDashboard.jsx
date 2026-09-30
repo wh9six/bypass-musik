@@ -731,9 +731,9 @@ export default function AdminDashboard({ session, onLogout }) {
                 {health?.youtubeTool && (
                   <small className={health.youtubeTool.exists && !health.youtubeTool.needsPython ? "" : "ws-inline-warning"}>
                     {!health.youtubeTool.exists
-                      ? "yt-dlp belum terunduh di server, jadi link yang gagal lewat ytdl-core pasti ikut gagal."
+                      ? "yt-dlp belum terunduh di server, jadi link yang gagal lewat ytdl-core pasti ikut gagal (perbaiki: npm install ulang atau node scripts/fetch-yt-dlp.mjs)."
                       : health.youtubeTool.needsPython
-                        ? "yt-dlp di server ini versi script (butuh python3). Tambahkan variabel YOUTUBE_DL_FILENAME=yt-dlp_linux lalu redeploy."
+                        ? "yt-dlp di server ini versi script (butuh python3). Unduh ulang yang standalone: node scripts/fetch-yt-dlp.mjs --force"
                         : `yt-dlp siap: ${health.youtubeTool.name} (standalone, tidak butuh Python).`}
                   </small>
                 )}
