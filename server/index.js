@@ -906,7 +906,7 @@ function toYtDlpFriendlyError(error) {
   }
 
   if (lowered.includes("sign in to confirm") || lowered.includes("age-restricted")) {
-    return "Video YouTube butuh login/age confirmation. Coba pakai cookies akun yang masih aktif.";
+    return "Video YouTube butuh login/age confirmation. Perbarui cookies (panel Cookies YouTube di /admin atau Variables YTDL_COOKIES_JSON di Railway), lalu cek lewat panel Diagnosis Link YouTube.";
   }
 
   if (lowered.includes("requested format is not available")) {
