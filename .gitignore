@@ -1,0 +1,21 @@
+node_modules/
+dist/
+.DS_Store
+.env
+.env.local
+.env.*
+!.env.example
+roblox-api-key.json
+upload-history*.json
+auth-sessions.json
+auth-users.json
+studio-settings.json
+cookies.json
+cookies-test.json
+creator-docs-tree.json
+
+# Artefak screenshot hasil pengecekan browser
+shot-*.png
+verify-*.png
+cek-*.png
+tmp-*.png
