@@ -33,3 +33,7 @@ tmp-*.js
 tmp-*.txt
 tmp-*.log
 tmp-*.json
+
+# Sampah hasil tes unduh: audio yang keunduh + dump player script dari ytdl-core
+*.webm
+*-player-script.js
