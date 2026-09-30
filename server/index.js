@@ -43,6 +43,8 @@ const YTDL_COOKIES_JSON = String(process.env.YTDL_COOKIES_JSON || "").trim();
 const YTDL_COOKIES_FILE = String(process.env.YTDL_COOKIES_FILE || "").trim();
 const DEFAULT_COOKIES_FILE_PATH = path.join(process.cwd(), "cookies.json");
 const YTDLP_COOKIES_FROM_BROWSER = String(process.env.YTDLP_COOKIES_FROM_BROWSER || "").trim();
+// "auto" = biarkan yt-dlp pilih client sendiri (paling awet terhadap perubahan YouTube).
+const YTDLP_PLAYER_CLIENT = String(process.env.YTDLP_PLAYER_CLIENT || "auto").trim();
 const DEFAULT_TONE_SPEED_MULTIPLIER = 2.325581;
 const DEFAULT_TONE_AMP_DB = -2;
 const DEFAULT_EXPORT_OGG_QUALITY = 8;
@@ -908,6 +910,10 @@ function toYtDlpFriendlyError(error) {
     return "Format audio terbaik tidak tersedia dari YouTube untuk video ini. Coba aktifkan cookies browser lewat YTDLP_COOKIES_FROM_BROWSER=chrome atau coba video lain.";
   }
 
+  if (lowered.includes("page needs to be reloaded")) {
+    return "YouTube menolak client player yang dipakai (biasanya client tv/android yang sudah tidak didukung). yt-dlp sudah otomatis coba client lain; kalau masih gagal, set YTDLP_PLAYER_CLIENT=web_safari.";
+  }
+
   if (lowered.includes("could not copy chrome cookie database")) {
     return "yt-dlp tidak bisa baca cookie Chrome saat browser masih aktif. Tutup semua jendela Chrome, atau pakai YTDL_COOKIES_FILE=./cookies.json.";
   }
@@ -1146,6 +1152,19 @@ async function resolveYtDlpBinary() {
 }
 
 // Cek isi binary: versi script butuh python3, versi standalone tidak
+let cachedYtDlpVersion = null;
+
+async function readYtDlpVersion(binaryPath) {
+  if (cachedYtDlpVersion) return cachedYtDlpVersion;
+  try {
+    const { stdout } = await runYtDlp(binaryPath, ["--version"], 20000);
+    cachedYtDlpVersion = stdout.trim().split("\n").pop().trim();
+  } catch {
+    cachedYtDlpVersion = "tidak diketahui";
+  }
+  return cachedYtDlpVersion;
+}
+
 async function getYouTubeToolStatus() {
   const binaryPath = await resolveYtDlpBinary();
   const status = {
@@ -1154,6 +1173,8 @@ async function getYouTubeToolStatus() {
     exists: Boolean(binaryPath),
     standalone: false,
     needsPython: false,
+    version: null,
+    playerClients: YTDLP_PLAYER_CLIENT === "auto" ? "auto" : YTDLP_PLAYER_CLIENT,
   };
 
   if (!binaryPath) return status;
@@ -1173,6 +1194,7 @@ async function getYouTubeToolStatus() {
     // tidak bisa dibaca, biarkan status apa adanya
   }
 
+  status.version = await readYtDlpVersion(binaryPath);
   return status;
 }
 
@@ -1203,9 +1225,8 @@ function buildYtDlpArgs(flags) {
   return args;
 }
 
-function runYtDlp(binaryPath, url, flags, timeoutMs) {
+function runYtDlp(binaryPath, args, timeoutMs) {
   return new Promise((resolve, reject) => {
-    const args = [...buildYtDlpArgs(flags), url];
     let child;
     try {
       child = spawn(binaryPath, args, { windowsHide: true });
@@ -1252,6 +1273,35 @@ function runYtDlp(binaryPath, url, flags, timeoutMs) {
   });
 }
 
+// yt-dlp versi 2025+ sudah membuang client android/ios lama, dan client tv sering
+// bikin error "The page needs to be reloaded" kalau cookie berasal dari jaringan
+// lain (misalnya cookie laptop dipakai di server Railway). Jadi urutan coba:
+// client default -> web_safari -> mweb -> web_embedded, masing-masing dengan dan
+// tanpa cookie.
+const YTDLP_FALLBACK_CLIENTS = ["web_safari", "mweb", "web_embedded"];
+
+function ytDlpPlayerArg(spec) {
+  const value = String(spec || "").trim();
+  // kosong = tidak mengirim --extractor-args, biarkan yt-dlp pakai urutan default-nya
+  return value ? `youtube:player_client=${value}` : undefined;
+}
+
+function buildYtDlpClientSpecs() {
+  const configured = YTDLP_PLAYER_CLIENT && YTDLP_PLAYER_CLIENT !== "auto" ? YTDLP_PLAYER_CLIENT : "";
+  const specs = [];
+  const add = (value) => {
+    const cleaned = String(value || "").trim();
+    if (!cleaned && specs.includes("")) return;
+    if (specs.includes(cleaned)) return;
+    specs.push(cleaned);
+  };
+
+  add(configured);
+  add("");
+  for (const client of YTDLP_FALLBACK_CLIENTS) add(client);
+  return specs;
+}
+
 async function downloadYouTubeAudioWithYtDlp(rawUrl) {
   const binaryPath = await resolveYtDlpBinary();
   if (!binaryPath) {
@@ -1275,44 +1325,53 @@ async function downloadYouTubeAudioWithYtDlp(rawUrl) {
       ffmpegLocation: FFMPEG_BINARY || undefined,
       cookies: cookiesPath || undefined,
       cookiesFromBrowser: !cookiesPath && YTDLP_COOKIES_FROM_BROWSER ? YTDLP_COOKIES_FROM_BROWSER : undefined,
-      extractorArgs: "youtube:player_client=android,web,web_embedded,tv",
       forceIpv4: true,
     };
 
-    const attempts = [
-      {
-        ...baseFlags,
-        format: "bestaudio[acodec!=none]/bestaudio/best[acodec!=none]/best",
-      },
-      {
-        ...baseFlags,
-        format: "ba/b",
-      },
-      {
-        ...baseFlags,
-        format: "best",
-      },
-      {
-        ...baseFlags,
-        extractAudio: true,
-        audioFormat: "mp3",
-        audioQuality: 0,
-      },
-    ];
+    const clientSpecs = buildYtDlpClientSpecs();
+    const lastErrorPerClient = [];
 
-    let lastError = null;
-    for (const flags of attempts) {
-      try {
-        await runYtDlp(binaryPath, rawUrl, flags, Math.max(REQUEST_TIMEOUT_MS, 180000));
-        lastError = null;
-        break;
-      } catch (error) {
-        lastError = error;
+    for (const spec of clientSpecs) {
+      const clientFlags = { ...baseFlags, extractorArgs: ytDlpPlayerArg(spec) };
+      // pakai cookie dulu (butuh buat video age-restricted), lalu tanpa cookie
+      // kalau server terblokir bot-check oleh YouTube
+      const cookieVariants = cookiesPath ? [clientFlags, { ...clientFlags, cookies: undefined }] : [clientFlags];
+      const formats = [
+        "bestaudio[acodec!=none]/bestaudio/best[acodec!=none]/best",
+        "ba/b",
+        "best",
+      ];
+
+      let clientError = null;
+      for (const flags of cookieVariants) {
+        for (const format of formats) {
+          try {
+            await runYtDlp(binaryPath, [...buildYtDlpArgs({ ...flags, format }), rawUrl], Math.max(REQUEST_TIMEOUT_MS, 180000));
+            clientError = null;
+            break;
+          } catch (error) {
+            clientError = error;
+          }
+        }
+        if (!clientError) break;
       }
+
+      if (!clientError) {
+        lastErrorPerClient.length = 0;
+        break;
+      }
+
+      lastErrorPerClient.push(clientError);
     }
 
-    if (lastError) {
-      throw lastError;
+    if (lastErrorPerClient.length) {
+      const combined = new Error(
+        lastErrorPerClient.map((error) => (error instanceof Error ? error.message : String(error))).join(" | ")
+      );
+      combined.stderr = lastErrorPerClient
+        .map((error) => `${String(error.stderr || "")} ${String(error.message || "")}`)
+        .join(" | ");
+      throw combined;
     }
 
     const entries = await fs.readdir(tempDir, { withFileTypes: true });

@@ -734,7 +734,13 @@ export default function AdminDashboard({ session, onLogout }) {
                       ? "yt-dlp belum terunduh di server, jadi link yang gagal lewat ytdl-core pasti ikut gagal (perbaiki: npm install ulang atau node scripts/fetch-yt-dlp.mjs)."
                       : health.youtubeTool.needsPython
                         ? "yt-dlp di server ini versi script (butuh python3). Unduh ulang yang standalone: node scripts/fetch-yt-dlp.mjs --force"
-                        : `yt-dlp siap: ${health.youtubeTool.name} (standalone, tidak butuh Python).`}
+                        : `yt-dlp siap: ${health.youtubeTool.name} (standalone, tidak butuh Python)${
+                            health.youtubeTool.version ? ` v${health.youtubeTool.version}` : ""
+                          }${
+                            health.youtubeTool.playerClients && health.youtubeTool.playerClients !== "auto"
+                              ? ` | player dipaksa: ${health.youtubeTool.playerClients}`
+                              : ""
+                          }.`}
                   </small>
                 )}
                 {cookieInfo?.usesEnvJson && (
